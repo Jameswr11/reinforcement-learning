@@ -6,6 +6,7 @@ import tensorflow as tf
 import timeit
 from time import time
 
+
 class DdqnAgent():
     def __init__(self,
                  env='LunarLander-v2',
@@ -15,9 +16,12 @@ class DdqnAgent():
                  weight_update_interval=5000,
                  epsilon=1.0,
                  epsilon_decay=.997,
-                 epsilon_min=.1,
+                 epsilon_min=.01,
                  learning_rate=.00025,
-                 loss_function=tf.keras.losses.Huber):
+                 loss_function=tf.keras.losses.Huber,
+                 solved_score=200,
+                 num_episodes_for_solved=100,
+                 logging=True):
 
         tf.random.set_seed(10)
         np.random.seed(10)
@@ -35,11 +39,16 @@ class DdqnAgent():
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
 
-        self.actual = self.get_q_net(8, 4)  # actions
-        self.target = self.get_q_net(8, 4)  # actions
+        self.actual = self.get_q_net(
+            self.env.observation_space.shape[0], self.env.action_space.n)
+        self.target = self.get_q_net(
+            self.env.observation_space.shape[0], self.env.action_space.n)
         self.target.set_weights(self.actual.get_weights())
         self.loss_function = loss_function
         self._seed_replay_buffer()
+        self.solved_score = solved_score
+        self.num_episodes_for_solved = num_episodes_for_solved
+        self.logging = logging
 
     def _get_action(self, actual, state):
         # select best action, using epsilon greedy strategy
@@ -92,9 +101,9 @@ class DdqnAgent():
 
         # DDQN update step
         for i in range(states.shape[0]):
-                actual_states[i, actions[i]] = \
-                    rewards[i] + self.gamma * target_s_primes[
-                        i, np.argmax(actual_s_primes[i])] * (1 - dones[i])
+            actual_states[i, actions[i]] = \
+                rewards[i] + self.gamma * target_s_primes[
+                    i, np.argmax(actual_s_primes[i])] * (1 - dones[i])
 
         self.actual.train_on_batch(states, actual_states)
 
@@ -102,7 +111,8 @@ class DdqnAgent():
 
     def train(self, max_episodes):
         steps = 0
-        reward_totals = deque(maxlen=100)
+        reward_totals = deque(maxlen=self.num_episodes_for_solved)
+
         for episode in range(max_episodes):
             state = self.env.reset()
             done = False
@@ -120,20 +130,15 @@ class DdqnAgent():
                     self.target.set_weights(self.actual.get_weights())
 
             reward_totals.append(total_reward)
-            if total_reward > 160:
-                self.actual.optimizer.lr.assign(.0001)
-                self.target.optimizer.lr.assign(.0001)
-            if len(reward_totals) == 100:
+
+            if self.logging:
                 print("episode: {0}, avg_reward: {1}".format(
-                    episode, np.sum(reward_totals) / 100))
-                # check if won or time to quit
-                if sum(reward_totals) / 100 >= 200.0 or episode == max_episodes:
-                    test_avg = test(self.actual, self.env)
-                    if test_avg > 200.0 or episode == max_episodes:
-                        if test_avg > 200:
-                            print('win!')
-                            print(test_avg)
-                        break
+                    episode, np.sum(reward_totals) / self.num_episodes_for_solved))
+
+            if sum(reward_totals) / self.num_episodes_for_solved >= self.solved_score:
+                return True
+            elif episode == max_episodes-1:
+                return False
 
     def get_q_net(self, input_dim, output_dim):
         model = tf.keras.Sequential([
@@ -148,8 +153,24 @@ class DdqnAgent():
 
         return model
 
-    # loss function implementation taken from:
-    # https://github.com/dennisfrancis/LunarLander-v2/blob/master/src/run_full_dqn.py
+    def test(self):
+        total_reward = 0
+        episode_rewards = []
+        for i in range(0, self.num_episodes_for_solved):
+            done = False
+            state = self.env.reset()
+            episode_r = 0
+
+            while not done:
+                action = np.argmax(self.actual.predict(np.array([state])))
+                state_prime, reward, done, _ = self.env.step(action)
+                state = state_prime
+                episode_r += reward
+
+            episode_rewards.append(episode_r)
+            total_reward += episode_r
+
+        return total_reward / self.num_episodes_for_solved
 
 
 class ReplayBuffer():
@@ -174,7 +195,7 @@ class ReplayBuffer():
         else:
             self.insertion_index += 1
 
-    def get_mini_batch(self, mini_batch_size):        
+    def get_mini_batch(self, mini_batch_size):
         # probabilities = (((self.reward_buffer - self.reward_buffer.min()) / (self.reward_buffer.max() - self.reward_buffer.min()))/(self.reward_buffer.size/2))
         probabilities = np.random.random(self.state_buffer.shape[0])
         probabilities /= np.sum(probabilities)
@@ -182,7 +203,9 @@ class ReplayBuffer():
         random_shifts /= random_shifts.sum()
         # shift by numbers & find largest (by finding the smallest of the negative)
         shifted_probabilities = random_shifts - probabilities
-        indices =  np.argpartition(shifted_probabilities, mini_batch_size)[:mini_batch_size]
+        indices = np.argpartition(shifted_probabilities, mini_batch_size)[
+            :mini_batch_size]
+
         return (self.state_buffer[indices],
                 self.action_buffer[indices],
                 self.state_prime_buffer[indices],
@@ -190,27 +213,6 @@ class ReplayBuffer():
                 self.done_buffer[indices])
 
 
-def test(actual, env):
-    total_reward = 0
-    episode_rewards = []
-    for i in range(0, 100):
-        done = False
-        s = env.reset()
-        episode_r = 0
-
-        while not done:
-            a = np.argmax(actual.predict(np.array([s])))
-            s_prime, r, done, _ = env.step(a)
-            s = s_prime
-            episode_r += r
-
-        episode_rewards.append(episode_r)
-        total_reward += episode_r
-
-    return total_reward / 100
-
-
 if __name__ == "__main__":
     agent = DdqnAgent()
-    agent.train(5000)
-    
+    solved = agent.train(1000)
